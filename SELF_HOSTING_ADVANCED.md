@@ -248,7 +248,7 @@ If you prefer to build and run services manually:
 **Prerequisites:** Go 1.26+, Node.js 20+, pnpm 10.28+, PostgreSQL 17 with pgvector.
 
 ```bash
-# Start your PostgreSQL (or use: docker compose up -d postgres)
+# Start your PostgreSQL (or from repo root: ./scripts/compose.sh up -d postgres)
 
 # Build the backend
 make build
@@ -394,7 +394,7 @@ CORS_ALLOWED_ORIGINS=http://192.168.1.100:3000
 Then restart the stack:
 
 ```bash
-docker compose -f docker-compose.selfhost.yml up -d
+./scripts/compose.sh -f docker-compose.selfhost.yml up -d --build
 ```
 
 ### WebSocket for LAN / Non-localhost Access
@@ -464,8 +464,8 @@ trusted network, for example a host-local mapping such as
 ## Upgrading
 
 ```bash
-docker compose -f docker-compose.selfhost.yml pull
-docker compose -f docker-compose.selfhost.yml up -d
+./scripts/compose.sh -f docker-compose.selfhost.yml pull
+./scripts/compose.sh -f docker-compose.selfhost.yml up -d
 ```
 
 Pin `MULTICA_IMAGE_TAG` in `.env` to an exact release like `v0.2.4` if you want to stay on a specific version. Migrations run automatically on backend startup. They are idempotent — running them multiple times has no effect.

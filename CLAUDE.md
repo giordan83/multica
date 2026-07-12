@@ -80,6 +80,32 @@ make stop             # stop app processes for this checkout
 make server           # run Go server only
 make daemon           # run local daemon
 make test             # Go tests
+make sqlc             # Regenerate sqlc code after editing SQL in server/pkg/db/queries/
+make migrate-up       # Run database migrations
+make migrate-down     # Rollback migrations
+
+# Run a single TS test (works for any package with a test script)
+pnpm --filter @multica/views exec vitest run auth/login-page.test.tsx
+pnpm --filter @multica/core exec vitest run runtimes/version.test.ts
+pnpm --filter @multica/web exec vitest run app/\(auth\)/login/page.test.tsx
+
+# Run a single Go test
+cd server && go test ./internal/handler/ -run TestName
+
+# Run a single E2E test (requires backend + frontend running)
+pnpm exec playwright test e2e/tests/specific-test.spec.ts
+
+# Desktop build & package
+pnpm --filter @multica/desktop build      # Compile TS → JS (reads .env.production)
+pnpm --filter @multica/desktop package    # Package into .app/.dmg/.exe (current platform only)
+
+# shadcn — config lives in packages/ui/components.json (Base UI variant, base-nova style)
+pnpm ui:add badge                # Adds component to packages/ui/components/ui/
+
+# Infrastructure
+make db-up            # Start shared PostgreSQL (pgvector/pg17 image)
+make db-down          # Stop shared PostgreSQL
+# Uses scripts/compose.sh → docker compose or podman compose (override: MULTICA_COMPOSE='podman compose')
 make sqlc             # regenerate sqlc code after SQL changes
 pnpm install
 pnpm dev:web

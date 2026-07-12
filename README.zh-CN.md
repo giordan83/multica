@@ -102,7 +102,7 @@ multica setup          # 连接 Multica Cloud，登录，启动 daemon
 > multica setup self-host
 > ```
 >
-> 需要 Docker。详见 [自部署指南](SELF_HOSTING.md)。
+> 需要 Docker 或支持 Compose 的 Podman。详见 [自部署指南](SELF_HOSTING.md)。
 
 ---
 
@@ -162,7 +162,7 @@ daemon 在后台运行，保持你的机器与 Multica 的连接。它会自动�
 
 参与 Multica 代码贡献，请参阅 [贡献指南](CONTRIBUTING.md)。
 
-**环境要求：** [Node.js](https://nodejs.org/) v20+, [pnpm](https://pnpm.io/) v10.28+, [Go](https://go.dev/) v1.26+, [Docker](https://www.docker.com/)
+**环境要求：** [Node.js](https://nodejs.org/) v20+, [pnpm](https://pnpm.io/) v10.28+, [Go](https://go.dev/) v1.26+，以及 [Docker](https://www.docker.com/) **或** [Podman](https://podman.io/)（需 Compose；见 SELF_HOSTING.md 中 Podman 一节）
 
 ```bash
 pnpm install
