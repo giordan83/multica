@@ -143,7 +143,7 @@ multica setup self-host
 On Windows, set `$env:MULTICA_MODE="with-server"`, then run the PowerShell installer:
 `irm https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.ps1 | iex`.
 
-This pulls the official images from GHCR and requires Docker. See the
+This pulls the official images from GHCR and requires Docker **or** Podman with Compose. See the
 [Self-Hosting Guide](SELF_HOSTING.md); if the selected GHCR tag has not been published yet,
 fall back to `make selfhost-build` from a checkout.
 
@@ -261,7 +261,7 @@ The docs are also available in [简体中文](https://multica.ai/docs/zh), [日�
 
 Contributors: start with the [Contributing Guide](CONTRIBUTING.md).
 
-**Prerequisites:** [Node.js](https://nodejs.org/) 22, [pnpm](https://pnpm.io/) 10.28.2, [Go](https://go.dev/) 1.26.9, [Docker](https://www.docker.com/)
+**Prerequisites:** [Node.js](https://nodejs.org/) 22, [pnpm](https://pnpm.io/) 10.28.2, [Go](https://go.dev/) 1.26.9, [Docker](https://www.docker.com/) **or** [Podman](https://podman.io/) with Compose (see [SELF_HOSTING.md — Podman](SELF_HOSTING.md#podman-linux))
 
 ```bash
 make dev

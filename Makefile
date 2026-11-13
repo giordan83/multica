@@ -30,7 +30,7 @@ export
 
 MULTICA_ARGS ?= $(ARGS)
 
-COMPOSE := docker compose
+COMPOSE := ./scripts/compose.sh
 
 define REQUIRE_ENV
 	@if [ ! -f "$(ENV_FILE)" ]; then \
@@ -40,28 +40,7 @@ define REQUIRE_ENV
 	fi
 endef
 
-# Self-hosting requires the Docker Compose CLI plugin (`docker compose`).
-# The self-host compose files use compose-spec syntax (top-level `name:`, no
-# `version:`) that the legacy v1 `docker-compose` standalone cannot parse, so we
-# fail early with an actionable message instead of a cryptic CLI parse error
-# (e.g. "unknown shorthand flag: 'f' in -f") when the plugin is missing or v1.
-# Keep the message short and OS-agnostic: per-OS install steps belong in docs.
-define REQUIRE_COMPOSE
-	@if ! compose_version=$$($(COMPOSE) version --short 2>/dev/null); then \
-		echo "Docker Compose ('docker compose') was not found."; \
-		echo "Self-hosting requires the Compose CLI plugin; legacy 'docker-compose' v1 is not supported."; \
-		echo "Install Docker Compose from https://docs.docker.com/compose/install/ and verify with: docker compose version"; \
-		exit 1; \
-	fi; \
-	case "$$compose_version" in \
-		1.*|v1.*) \
-			echo "'$(COMPOSE)' is legacy Docker Compose v1 ($$compose_version)."; \
-			echo "Self-hosting requires the Compose CLI plugin; legacy 'docker-compose' v1 is not supported."; \
-			echo "Install Docker Compose from https://docs.docker.com/compose/install/ and verify with: docker compose version"; \
-			exit 1; \
-			;; \
-	esac
-endef
+# ---------- Self-hosting (Compose: Docker or Podman) ----------
 
 # Default target changed from selfhost to help: bare `make` now prints this help
 # instead of launching a full Docker Compose build, which is safer for onboarding.
@@ -109,11 +88,10 @@ selfhost: ## Create .env if needed, then pull and start the official self-hosted
 		exit 1; \
 	fi
 	@echo "==> Starting Multica via Docker Compose..."
-	$(COMPOSE) -f docker-compose.selfhost.yml up -d
+	$(COMPOSE) -f docker-compose.selfhost.yml up -d --build
 	@bash scripts/selfhost-wait.sh official
 
 selfhost-build: ## Build backend/web from the current checkout and start the self-hosted stack
-	$(REQUIRE_COMPOSE)
 	@if [ ! -f .env ]; then \
 		echo "==> Creating .env from .env.example..."; \
 		cp .env.example .env; \
@@ -138,7 +116,6 @@ selfhost-build: ## Build backend/web from the current checkout and start the sel
 	@bash scripts/selfhost-wait.sh build
 
 selfhost-stop: ## Stop the self-hosted Docker Compose stack
-	$(REQUIRE_COMPOSE)
 	@echo "==> Stopping Multica services..."
 	$(COMPOSE) -f docker-compose.selfhost.yml down
 	@echo "✓ All services stopped."
