@@ -6,14 +6,27 @@ import {
   isReservedShortcut,
   parseLegacyShortcut,
   SHORTCUT_ACTIONS,
+  SHORTCUT_ACTION_BY_ID,
+  shortcutChordEquals,
   shortcutFromEvent,
   shortcutMatchesEvent,
 } from "./definitions";
-import { configureShortcutPlatform, detectShortcutPlatform } from "./platform";
+import {
+  configureShortcutPlatform,
+  configureShortcutRuntime,
+  detectShortcutPlatform,
+  detectShortcutRuntime,
+  getShortcutRuntime,
+} from "./platform";
 
 function keyEvent(
   key: string,
-  modifiers: Partial<Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "altKey" | "shiftKey">> = {},
+  fields: Partial<
+    Pick<
+      KeyboardEvent,
+      "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey"
+    >
+  > = {},
 ): KeyboardEvent {
   return {
     key,
@@ -21,12 +34,13 @@ function keyEvent(
     ctrlKey: false,
     altKey: false,
     shiftKey: false,
-    ...modifiers,
+    ...fields,
   } as KeyboardEvent;
 }
 
 afterEach(() => {
   configureShortcutPlatform(null);
+  configureShortcutRuntime(null);
   vi.unstubAllGlobals();
 });
 
@@ -49,6 +63,60 @@ describe("keyboard shortcut definitions", () => {
         ),
       ).toBe(true);
     }
+  });
+
+  it("ships at most one action per default binding", () => {
+    const seen: { id: string; shortcut: ReturnType<typeof createShortcutChord> }[] = [];
+    for (const action of SHORTCUT_ACTIONS) {
+      const shortcut = action.defaultShortcut;
+      if (!shortcut) continue;
+      const clash = seen.find((other) => shortcutChordEquals(other.shortcut, shortcut));
+      expect(clash?.id, `${action.id} duplicates ${clash?.id}`).toBeUndefined();
+      seen.push({ id: action.id, shortcut });
+    }
+  });
+
+  it("keeps the floating chat toggle usable on every platform and runtime", () => {
+    const action = SHORTCUT_ACTION_BY_ID.toggleChat;
+    expect(action.defaultShortcut).toEqual(
+      createShortcutChord("J", { primary: true }),
+    );
+    for (const platform of ["macos", "windows", "linux"] as const) {
+      for (const runtime of ["web", "desktop"] as const) {
+        expect(
+          isShortcutAllowedForAction(
+            "toggleChat",
+            createShortcutChord("J", { primary: true }),
+            platform,
+            runtime,
+          ),
+          `Mod+J must stay assignable on ${platform}/${runtime}`,
+        ).toBe(true);
+      }
+    }
+    // Dismissing chat has to work with the caret inside its own composer.
+    expect(action.allowInEditable).toBe(true);
+  });
+
+  it("keeps the new-chat shortcut usable on every platform and runtime", () => {
+    const action = SHORTCUT_ACTION_BY_ID.newChat;
+    const chord = createShortcutChord("J", { primary: true, shift: true });
+    expect(action.defaultShortcut).toEqual(chord);
+    for (const platform of ["macos", "windows", "linux"] as const) {
+      for (const runtime of ["web", "desktop"] as const) {
+        expect(
+          isShortcutAllowedForAction("newChat", chord, platform, runtime),
+          `Mod+Shift+J must stay assignable on ${platform}/${runtime}`,
+        ).toBe(true);
+      }
+    }
+    expect(action.allowInEditable).toBe(true);
+    expect(shortcutMatchesEvent(chord, keyEvent("J", { metaKey: true, shiftKey: true }), "macos")).toBe(true);
+    expect(shortcutMatchesEvent(chord, keyEvent("j", { metaKey: true }), "macos")).toBe(false);
+  });
+
+  it("keeps the plain inbox archive key out of editable controls", () => {
+    expect(SHORTCUT_ACTION_BY_ID.archiveInboxItem.allowInEditable).toBe(false);
   });
 
   it("strictly distinguishes Command and Control on macOS", () => {
@@ -91,6 +159,14 @@ describe("keyboard shortcut definitions", () => {
     expect(shortcutMatchesEvent(null, keyEvent(key, modifiers), "macos")).toBe(false);
   });
 
+  it("ignores synthetic events without a key, such as Chrome autofill", () => {
+    const event = keyEvent(undefined as unknown as string, { metaKey: true });
+    expect(shortcutFromEvent(event, "macos")).toBeNull();
+    expect(
+      shortcutMatchesEvent(createShortcutChord("K", { primary: true }), event, "macos"),
+    ).toBe(false);
+  });
+
   it("formats the same semantic binding for each platform", () => {
     const shortcut = createShortcutChord("Enter", { primary: true });
     expect(formatShortcut(shortcut, "macos")).toBe("⌘↵");
@@ -126,6 +202,137 @@ describe("keyboard shortcut definitions", () => {
     expect(
       isReservedShortcut(createShortcutChord("K", { primary: true }), "windows"),
     ).toBe(false);
+  });
+
+  it("reserves the preferences chord on every runtime", () => {
+    // Desktop opens Settings from the main process (before-input-event) and
+    // browsers open their own settings, so Mod+, can never be recorded for a
+    // product action.
+    const chord = createShortcutChord(",", { primary: true });
+    expect(isReservedShortcut(chord, "macos", "desktop")).toBe(true);
+    expect(isReservedShortcut(chord, "macos", "web")).toBe(true);
+    expect(isReservedShortcut(chord, "windows", "desktop")).toBe(true);
+    expect(isShortcutAllowedForAction("goSettings", chord, "macos", "desktop")).toBe(false);
+    // Only with the primary modifier — a bare comma stays typeable.
+    expect(isReservedShortcut(createShortcutChord(","), "macos", "desktop")).toBe(false);
+  });
+
+  it("reserves browser-style tab selection on every platform and runtime", () => {
+    for (const key of ["1", "2", "3", "4", "5", "6", "7", "8", "9"]) {
+      const chord = createShortcutChord(key, { primary: true });
+      for (const platform of ["macos", "windows", "linux"] as const) {
+        for (const runtime of ["web", "desktop"] as const) {
+          expect(isReservedShortcut(chord, platform, runtime)).toBe(true);
+          expect(
+            isShortcutAllowedForAction("openSearch", chord, platform, runtime),
+          ).toBe(false);
+        }
+      }
+    }
+    expect(
+      isReservedShortcut(createShortcutChord("1"), "macos", "desktop"),
+    ).toBe(false);
+  });
+
+  it("models layout-sensitive number-row chords by their logical key", () => {
+    const ampersand = shortcutFromEvent(
+      keyEvent("&", { code: "Digit1", ctrlKey: true }),
+      "windows",
+    );
+    expect(ampersand).toEqual(
+      createShortcutChord("&", { primary: true }),
+    );
+    expect(isReservedShortcut(ampersand!, "windows", "desktop")).toBe(
+      false,
+    );
+
+    const shiftedDigit = shortcutFromEvent(
+      keyEvent("1", { code: "Digit1", ctrlKey: true, shiftKey: true }),
+      "windows",
+    );
+    expect(shiftedDigit).toEqual(
+      createShortcutChord("1", { primary: true, shift: true }),
+    );
+    expect(isReservedShortcut(shiftedDigit!, "windows", "desktop")).toBe(
+      true,
+    );
+  });
+
+  it("reserves browser-owned accelerators on web but frees the bare chords on desktop", () => {
+    for (const key of ["P", "L", "T", "N", "D", "U"]) {
+      const chord = createShortcutChord(key, { primary: true });
+      expect(isReservedShortcut(chord, "macos", "web")).toBe(true);
+      expect(isReservedShortcut(chord, "windows", "web")).toBe(true);
+      expect(isReservedShortcut(chord, "macos", "desktop")).toBe(false);
+      expect(isReservedShortcut(chord, "windows", "desktop")).toBe(false);
+      // Only the bare primary chord opens up — extra modifiers keep the
+      // historical reservation on every runtime.
+      for (const extra of [{ shift: true }, { alt: true }, { control: true }]) {
+        const variant = createShortcutChord(key, { primary: true, ...extra });
+        expect(isReservedShortcut(variant, "macos", "desktop")).toBe(true);
+        expect(isReservedShortcut(variant, "macos", "web")).toBe(true);
+      }
+    }
+    // OS-owned combos that motivated the narrowing must stay reserved on
+    // desktop: Option+Cmd+D toggles the macOS Dock, Ctrl+Alt+T opens a
+    // terminal on common Linux desktops.
+    expect(
+      isReservedShortcut(
+        createShortcutChord("D", { primary: true, alt: true }),
+        "macos",
+        "desktop",
+      ),
+    ).toBe(true);
+    expect(
+      isReservedShortcut(
+        createShortcutChord("T", { primary: true, alt: true }),
+        "linux",
+        "desktop",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps app-owned and editing accelerators reserved on desktop", () => {
+    for (const key of ["W", "R", "Q", "A", "C", "V", "X", "Y", "Z", "0", "Minus", "Plus"]) {
+      expect(
+        isReservedShortcut(createShortcutChord(key, { primary: true }), "macos", "desktop"),
+      ).toBe(true);
+    }
+    expect(isReservedShortcut(createShortcutChord("F5"), "windows", "desktop")).toBe(true);
+    expect(
+      isReservedShortcut(createShortcutChord("Space", { primary: true }), "macos", "desktop"),
+    ).toBe(true);
+  });
+
+  it("allows recording bare Cmd/Ctrl+P for an action on desktop only", () => {
+    const cmdP = createShortcutChord("P", { primary: true });
+    expect(isShortcutAllowedForAction("openSearch", cmdP, "macos", "desktop")).toBe(true);
+    expect(isShortcutAllowedForAction("openSearch", cmdP, "macos", "web")).toBe(false);
+    expect(isShortcutAllowedForAction("goIssues", cmdP, "windows", "desktop")).toBe(true);
+    // Modifier variants keep the historical reservation even on desktop.
+    expect(
+      isShortcutAllowedForAction(
+        "openSearch",
+        createShortcutChord("P", { primary: true, shift: true }),
+        "macos",
+        "desktop",
+      ),
+    ).toBe(false);
+    // Send stays locked to Enter / Mod+Enter regardless of runtime.
+    expect(isShortcutAllowedForAction("send", cmdP, "macos", "desktop")).toBe(false);
+  });
+
+  it("detects the desktop runtime from preload globals with a configure override", () => {
+    expect(detectShortcutRuntime()).toBe("web");
+    vi.stubGlobal("window", { desktopAPI: {} });
+    expect(detectShortcutRuntime()).toBe("desktop");
+    vi.stubGlobal("window", { electron: {} });
+    expect(detectShortcutRuntime()).toBe("desktop");
+    vi.stubGlobal("window", {});
+    expect(detectShortcutRuntime()).toBe("web");
+    expect(getShortcutRuntime()).toBe("web");
+    configureShortcutRuntime("desktop");
+    expect(getShortcutRuntime()).toBe("desktop");
   });
 
   it("rejects modifier-only, composition-only, and unidentified key events", () => {

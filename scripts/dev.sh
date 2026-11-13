@@ -15,7 +15,7 @@ fi
 
 if [ ${#missing[@]} -gt 0 ]; then
   echo "✗ Missing prerequisites: ${missing[*]}"
-  echo "  Please install: Node.js v20+, pnpm v10.28+, Go v1.26+, and Docker or Podman (see SELF_HOSTING.md — Podman)."
+  echo "  Please install: Node.js 22, pnpm 10.28.2, Go 1.26.9, and Docker or Podman (see SELF_HOSTING.md — Podman)."
   echo "  Optional: export MULTICA_COMPOSE='podman compose' if your compose CLI is non-standard."
   exit 1
 fi

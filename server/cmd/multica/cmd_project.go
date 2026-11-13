@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/multica-ai/multica/server/internal/cli"
@@ -91,6 +92,43 @@ var projectResourceRemoveCmd = &cobra.Command{
 	RunE:  runProjectResourceRemove,
 }
 
+var projectMemberCmd = &cobra.Command{
+	Use:   "member",
+	Short: "Manage the members of a private project",
+}
+
+var projectMemberListCmd = &cobra.Command{
+	Use:   "list <project-id>",
+	Short: "List a project's members",
+	Args:  exactArgs(1),
+	RunE:  runProjectMemberList,
+}
+
+var projectMemberAddCmd = &cobra.Command{
+	Use:   "add <project-id> <member>...",
+	Short: "Add workspace members to a project (name, email or user id)",
+	Args:  cobra.MinimumNArgs(2),
+	RunE:  runProjectMemberAdd,
+}
+
+var projectMemberRemoveCmd = &cobra.Command{
+	Use:   "remove <project-id> <member>",
+	Short: "Remove a member from a project (name, email or user id)",
+	Args:  exactArgs(2),
+	RunE:  runProjectMemberRemove,
+}
+
+var validProjectVisibilities = []string{"workspace", "private"}
+
+func validateProjectVisibility(v string) error {
+	for _, allowed := range validProjectVisibilities {
+		if v == allowed {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid visibility %q; valid values: %s", v, strings.Join(validProjectVisibilities, ", "))
+}
+
 var validProjectStatuses = []string{
 	"planned", "in_progress", "paused", "completed", "cancelled",
 }
@@ -121,6 +159,13 @@ func init() {
 	projectResourceCmd.AddCommand(projectResourceUpdateCmd)
 	projectResourceCmd.AddCommand(projectResourceRemoveCmd)
 
+	projectCmd.AddCommand(projectMemberCmd)
+	projectMemberCmd.AddCommand(projectMemberListCmd)
+	projectMemberCmd.AddCommand(projectMemberAddCmd)
+	projectMemberCmd.AddCommand(projectMemberRemoveCmd)
+	projectMemberListCmd.Flags().String("output", "table", "Output format: table or json")
+	projectMemberAddCmd.Flags().String("output", "table", "Output format: table or json")
+
 	// project list
 	projectListCmd.Flags().String("output", "table", "Output format: table or json")
 	projectListCmd.Flags().Bool("full-id", false, "Show full UUIDs in table output")
@@ -135,7 +180,11 @@ func init() {
 	projectCreateCmd.Flags().String("status", "", "Project status")
 	projectCreateCmd.Flags().String("icon", "", "Project icon (emoji)")
 	projectCreateCmd.Flags().String("lead", "", "Lead name (member or agent)")
+	projectCreateCmd.Flags().String("start-date", "", "Start date (calendar day, YYYY-MM-DD)")
+	projectCreateCmd.Flags().String("due-date", "", "Due date (calendar day, YYYY-MM-DD)")
 	projectCreateCmd.Flags().StringArray("repo", nil, "Attach a github_repo resource by URL (may be repeated)")
+	projectCreateCmd.Flags().String("visibility", "", "Who can see the project: workspace (default) or private")
+	projectCreateCmd.Flags().StringArray("member", nil, "Member of a private project (name, email or user id; may be repeated). You are always added")
 	projectCreateCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// project resource list
@@ -152,6 +201,7 @@ func init() {
 	projectResourceAddCmd.Flags().String("local-path", "", "Shortcut: absolute path to the working directory (only used when --type local_directory)")
 	projectResourceAddCmd.Flags().String("daemon-id", "", "Shortcut: id of the daemon that owns the local path (only used when --type local_directory)")
 	projectResourceAddCmd.Flags().String("ref-label", "", "Shortcut: optional label embedded in resource_ref (only used when --type local_directory)")
+	projectResourceAddCmd.Flags().String("execution-mode", "", "Shortcut: how runs share the directory — in_place (default, one run at a time) or worktree (each run gets its own git worktree; requires a git repo) (only used when --type local_directory)")
 	projectResourceAddCmd.Flags().String("ref", "", "Generic JSON resource_ref payload, or a github_repo checkout ref when used with --url")
 	projectResourceAddCmd.Flags().String("label", "", "Optional human-readable label")
 	projectResourceAddCmd.Flags().String("output", "json", "Output format: table or json")
@@ -163,6 +213,7 @@ func init() {
 	projectResourceUpdateCmd.Flags().String("local-path", "", "Shortcut: new absolute local path (local_directory)")
 	projectResourceUpdateCmd.Flags().String("daemon-id", "", "Shortcut: new daemon id (local_directory)")
 	projectResourceUpdateCmd.Flags().String("ref-label", "", "Shortcut: new label embedded in resource_ref (local_directory)")
+	projectResourceUpdateCmd.Flags().String("execution-mode", "", "Shortcut: new execution mode — in_place or worktree (local_directory)")
 	projectResourceUpdateCmd.Flags().String("ref", "", "Generic JSON resource_ref payload, or a github_repo checkout ref")
 	projectResourceUpdateCmd.Flags().String("label", "", "New human-readable label; pass an empty string to clear")
 	projectResourceUpdateCmd.Flags().Bool("clear-label", false, "Clear the human-readable label")
@@ -178,6 +229,10 @@ func init() {
 	projectUpdateCmd.Flags().String("status", "", "New status")
 	projectUpdateCmd.Flags().String("icon", "", "New icon (emoji)")
 	projectUpdateCmd.Flags().String("lead", "", "New lead name (member or agent)")
+	projectUpdateCmd.Flags().String("start-date", "", "New start date (calendar day, YYYY-MM-DD; pass empty string to clear)")
+	projectUpdateCmd.Flags().String("due-date", "", "New due date (calendar day, YYYY-MM-DD; pass empty string to clear)")
+	projectUpdateCmd.Flags().String("visibility", "", "Switch visibility: workspace or private")
+	projectUpdateCmd.Flags().StringArray("member", nil, "Members to add when switching to private (name, email or user id; may be repeated)")
 	projectUpdateCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// project delete
@@ -187,9 +242,7 @@ func init() {
 	projectStatusCmd.Flags().String("output", "table", "Output format: table or json")
 }
 
-// ---------------------------------------------------------------------------
 // Project commands
-// ---------------------------------------------------------------------------
 
 func runProjectList(cmd *cobra.Command, _ []string) error {
 	client, err := newAPIClient(cmd)
@@ -332,6 +385,15 @@ func runProjectCreate(cmd *cobra.Command, _ []string) error {
 		body["lead_type"] = aType
 		body["lead_id"] = aID
 	}
+	if v, _ := cmd.Flags().GetString("start-date"); v != "" {
+		body["start_date"] = v
+	}
+	if v, _ := cmd.Flags().GetString("due-date"); v != "" {
+		body["due_date"] = v
+	}
+	if err := applyProjectVisibilityFlags(ctx, cmd, client, body); err != nil {
+		return err
+	}
 
 	// Bundle resources into the create payload so the server attaches them in
 	// the same transaction; this avoids leaving a half-attached project on
@@ -417,9 +479,22 @@ func runProjectUpdate(cmd *cobra.Command, args []string) error {
 		body["lead_type"] = aType
 		body["lead_id"] = aID
 	}
+	// Changed() (not "") so an explicit --start-date "" reaches the server as a
+	// clear, mirroring the issue update CLI.
+	if cmd.Flags().Changed("start-date") {
+		v, _ := cmd.Flags().GetString("start-date")
+		body["start_date"] = v
+	}
+	if cmd.Flags().Changed("due-date") {
+		v, _ := cmd.Flags().GetString("due-date")
+		body["due_date"] = v
+	}
+	if err := applyProjectVisibilityFlags(ctx, cmd, client, body); err != nil {
+		return err
+	}
 
 	if len(body) == 0 {
-		return fmt.Errorf("no fields to update; use flags like --title, --status, --description, --icon, --lead")
+		return fmt.Errorf("no fields to update; use flags like --title, --status, --description, --icon, --lead, --start-date, --due-date, --visibility")
 	}
 
 	var result map[string]any
@@ -500,9 +575,7 @@ func runProjectStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
 // Project resource commands
-// ---------------------------------------------------------------------------
 
 func runProjectResourceList(cmd *cobra.Command, args []string) error {
 	client, err := newAPIClient(cmd)
@@ -586,6 +659,9 @@ func runProjectResourceAdd(cmd *cobra.Command, args []string) error {
 			ref := map[string]any{"local_path": pathVal, "daemon_id": daemonVal}
 			if refLabel, _ := cmd.Flags().GetString("ref-label"); strings.TrimSpace(refLabel) != "" {
 				ref["label"] = strings.TrimSpace(refLabel)
+			}
+			if mode, _ := cmd.Flags().GetString("execution-mode"); strings.TrimSpace(mode) != "" {
+				ref["execution_mode"] = strings.TrimSpace(mode)
 			}
 			body["resource_ref"] = ref
 		default:
@@ -825,7 +901,8 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 		pathSet := cmd.Flags().Changed("local-path")
 		daemonSet := cmd.Flags().Changed("daemon-id")
 		labelSet := cmd.Flags().Changed("ref-label")
-		if !pathSet && !daemonSet && !labelSet {
+		modeSet := cmd.Flags().Changed("execution-mode")
+		if !pathSet && !daemonSet && !labelSet && !modeSet {
 			return nil, false, nil
 		}
 		ref := map[string]any{}
@@ -838,6 +915,9 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 			}
 			if l, ok := existingRef["label"].(string); ok && strings.TrimSpace(l) != "" {
 				ref["label"] = strings.TrimSpace(l)
+			}
+			if m, ok := existingRef["execution_mode"].(string); ok && strings.TrimSpace(m) != "" {
+				ref["execution_mode"] = strings.TrimSpace(m)
 			}
 		}
 		if pathSet {
@@ -862,6 +942,16 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 				ref["label"] = refLabel
 			}
 		}
+		if modeSet {
+			// An empty value clears the field back to the in_place default,
+			// mirroring how --ref-label clears a label.
+			mode := strings.TrimSpace(mustString(cmd, "execution-mode"))
+			if mode == "" {
+				delete(ref, "execution_mode")
+			} else {
+				ref["execution_mode"] = mode
+			}
+		}
 		if v, ok := ref["local_path"].(string); !ok || v == "" {
 			return nil, false, fmt.Errorf("local_directory: --local-path is required (no existing local_path to merge with)")
 		}
@@ -873,7 +963,7 @@ func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string, existing
 		// Unknown type or empty (resource not found) — caller must use --ref.
 		if cmd.Flags().Changed("url") || cmd.Flags().Changed("default-branch-hint") ||
 			cmd.Flags().Changed("local-path") || cmd.Flags().Changed("daemon-id") ||
-			cmd.Flags().Changed("ref-label") {
+			cmd.Flags().Changed("ref-label") || cmd.Flags().Changed("execution-mode") {
 			return nil, false, fmt.Errorf("no built-in shortcut for resource type %q; pass the full payload via --ref '<json>'", resourceType)
 		}
 		return nil, false, nil
@@ -934,9 +1024,7 @@ func summarizeResourceRef(raw any) string {
 	return ""
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 func formatLead(project map[string]any, actors actorDisplayLookup) string {
 	lType := strVal(project, "lead_type")
@@ -945,4 +1033,136 @@ func formatLead(project map[string]any, actors actorDisplayLookup) string {
 		return ""
 	}
 	return actors.actor(lType, lID)
+}
+
+// applyProjectVisibilityFlags maps --visibility / --member onto a project
+// create or update body.
+func applyProjectVisibilityFlags(ctx context.Context, cmd *cobra.Command, client *cli.APIClient, body map[string]any) error {
+	visibility, _ := cmd.Flags().GetString("visibility")
+	members, _ := cmd.Flags().GetStringArray("member")
+	if visibility == "" {
+		if len(members) > 0 {
+			return fmt.Errorf("--member requires --visibility private")
+		}
+		return nil
+	}
+	if err := validateProjectVisibility(visibility); err != nil {
+		return err
+	}
+	body["visibility"] = visibility
+	if len(members) == 0 {
+		return nil
+	}
+	if visibility != "private" {
+		return fmt.Errorf("--member requires --visibility private")
+	}
+	ids, err := resolveProjectMemberUserIDs(ctx, client, members)
+	if err != nil {
+		return err
+	}
+	body["member_ids"] = ids
+	return nil
+}
+
+// resolveProjectMemberUserIDs turns member names, emails or user ids into
+// user ids. Only workspace members qualify.
+func resolveProjectMemberUserIDs(ctx context.Context, client *cli.APIClient, refs []string) ([]string, error) {
+	ids := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		if _, err := uuid.Parse(ref); err == nil {
+			ids = append(ids, ref)
+			continue
+		}
+		_, id, err := resolveAssignee(ctx, client, ref, memberOnlyKinds)
+		if err != nil {
+			return nil, fmt.Errorf("resolve member %q: %w", ref, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func printProjectMembers(cmd *cobra.Command, result map[string]any) error {
+	output, _ := cmd.Flags().GetString("output")
+	if output != "table" {
+		return cli.PrintJSON(os.Stdout, result)
+	}
+	members, _ := result["members"].([]any)
+	headers := []string{"USER ID", "NAME", "EMAIL"}
+	rows := make([][]string, 0, len(members))
+	for _, raw := range members {
+		m, _ := raw.(map[string]any)
+		rows = append(rows, []string{strVal(m, "user_id"), strVal(m, "name"), strVal(m, "email")})
+	}
+	cli.PrintTable(os.Stdout, headers, rows)
+	return nil
+}
+
+func runProjectMemberList(cmd *cobra.Command, args []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+	projectRef, err := resolveProjectID(ctx, client, args[0])
+	if err != nil {
+		return fmt.Errorf("resolve project: %w", err)
+	}
+	var result map[string]any
+	if err := client.GetJSON(ctx, "/api/projects/"+projectRef.ID+"/members", &result); err != nil {
+		return fmt.Errorf("list project members: %w", err)
+	}
+	return printProjectMembers(cmd, result)
+}
+
+func runProjectMemberAdd(cmd *cobra.Command, args []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+	projectRef, err := resolveProjectID(ctx, client, args[0])
+	if err != nil {
+		return fmt.Errorf("resolve project: %w", err)
+	}
+	ids, err := resolveProjectMemberUserIDs(ctx, client, args[1:])
+	if err != nil {
+		return err
+	}
+	var result map[string]any
+	if err := client.PostJSON(ctx, "/api/projects/"+projectRef.ID+"/members", map[string]any{"user_ids": ids}, &result); err != nil {
+		return fmt.Errorf("add project members: %w", err)
+	}
+	return printProjectMembers(cmd, result)
+}
+
+func runProjectMemberRemove(cmd *cobra.Command, args []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := cli.APIContext(context.Background())
+	defer cancel()
+	projectRef, err := resolveProjectID(ctx, client, args[0])
+	if err != nil {
+		return fmt.Errorf("resolve project: %w", err)
+	}
+	ids, err := resolveProjectMemberUserIDs(ctx, client, args[1:2])
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("member is required")
+	}
+	if err := client.DeleteJSON(ctx, "/api/projects/"+projectRef.ID+"/members/"+ids[0]); err != nil {
+		return fmt.Errorf("remove project member: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Removed %s from project %s.\n", args[1], projectRef.ID)
+	return nil
 }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createShortcutChord } from "./definitions";
+import { configureShortcutRuntime } from "./platform";
 import {
   findShortcutConflict,
   getShortcut,
@@ -10,6 +11,7 @@ import {
 
 afterEach(() => {
   useShortcutStore.getState().resetAll();
+  configureShortcutRuntime(null);
 });
 
 describe("shortcut store", () => {
@@ -68,6 +70,30 @@ describe("shortcut store", () => {
     ).toEqual({});
   });
 
+  it("keeps browser-only bindings when the runtime is desktop", () => {
+    const cmdP = createShortcutChord("P", { primary: true });
+
+    configureShortcutRuntime("desktop");
+    expect(sanitizeShortcutOverrides({ openSearch: cmdP })).toEqual({
+      openSearch: cmdP,
+    });
+    useShortcutStore.getState().setShortcut("openSearch", cmdP);
+    expect(getShortcut("openSearch")).toEqual(cmdP);
+
+    // The same persisted value hydrating in a browser falls back to default.
+    configureShortcutRuntime("web");
+    expect(sanitizeShortcutOverrides({ openSearch: cmdP })).toEqual({});
+  });
+
+  it("keeps persisted punctuation overrides that remain reachable on desktop", () => {
+    const ctrlAmpersand = createShortcutChord("&", { primary: true });
+
+    configureShortcutRuntime("desktop");
+    expect(
+      sanitizeShortcutOverrides({ openSearch: ctrlAmpersand }),
+    ).toEqual({ openSearch: ctrlAmpersand });
+  });
+
   it("finds conflicts against defaults and overrides", () => {
     expect(
       findShortcutConflict(
@@ -76,7 +102,7 @@ describe("shortcut store", () => {
       ),
     ).toBe("openSearch");
 
-    const custom = createShortcutChord("1", { primary: true });
+    const custom = createShortcutChord("G", { primary: true });
     useShortcutStore.getState().setShortcut("goInbox", custom);
     expect(findShortcutConflict("goChat", custom)).toBe("goInbox");
   });

@@ -22,7 +22,9 @@ const INBOX_GROUP_KEYS = [
   "assignments",
   "status_changes",
   "comments",
+  "mentions",
   "updates",
+  "new_issues",
   "agent_activity",
 ] as const;
 type InboxGroupKey = (typeof INBOX_GROUP_KEYS)[number];
@@ -45,10 +47,6 @@ export function NotificationsTab() {
       delete updated[key];
     }
     mutation.mutate(updated, {
-      onSuccess: () =>
-        toast.success(t(($) => $.auto_save.toast_saved), {
-          id: "settings-auto-save",
-        }),
       onError: (err) =>
         toast.error(
           err instanceof Error && err.message
@@ -61,10 +59,11 @@ export function NotificationsTab() {
   const systemEnabled = preferences.system_notifications !== "muted";
 
   return (
-    <SettingsTab title={t(($) => $.page.tabs.notifications)}>
+    <SettingsTab title={t(($) => $.page.tabs.notifications)} scope="workspace-only">
       <SettingsSection
         title={t(($) => $.notifications.title)}
         description={t(($) => $.notifications.description)}
+        anchor="inbox"
       >
         <SettingsCard>
             {INBOX_GROUP_KEYS.map((key: InboxGroupKey) => {
@@ -72,6 +71,7 @@ export function NotificationsTab() {
               return (
                 <SettingsRow
                   key={key}
+                  anchor={key}
                   label={t(($) => $.notifications.groups[key].label)}
                   description={t(($) => $.notifications.groups[key].description)}
                 >
@@ -88,19 +88,32 @@ export function NotificationsTab() {
 
       <SettingsSection
         title={t(($) => $.notifications.system.title)}
-        description={t(($) => $.notifications.system.description)}
+        anchor={systemEnabled ? undefined : "chat_replies"}
       >
         <SettingsCard>
           <SettingsRow
+            anchor="system"
             label={t(($) => $.notifications.system.label)}
-            description={t(($) => $.notifications.system.hint)}
           >
-              <Switch
-                checked={systemEnabled}
-                aria-label={t(($) => $.notifications.system.label)}
-                onCheckedChange={(checked) => handleToggle("system_notifications", checked)}
-              />
+            <Switch
+              checked={systemEnabled}
+              aria-label={t(($) => $.notifications.system.label)}
+              onCheckedChange={(checked) => handleToggle("system_notifications", checked)}
+            />
           </SettingsRow>
+          {systemEnabled && (
+            <SettingsRow
+              anchor="chat_replies"
+              className="pl-8"
+              label={t(($) => $.notifications.groups.chat_replies.label)}
+            >
+              <Switch
+                checked={preferences.chat_replies !== "muted"}
+                aria-label={t(($) => $.notifications.groups.chat_replies.label)}
+                onCheckedChange={(checked) => handleToggle("chat_replies", checked)}
+              />
+            </SettingsRow>
+          )}
         </SettingsCard>
 
         {/* Web-only: the browser permission banners require. Renders nothing on

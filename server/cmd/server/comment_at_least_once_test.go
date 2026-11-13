@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -65,12 +66,13 @@ func TestConsecutiveCommentsMergeNotDropped(t *testing.T) {
 		resp.Body.Close()
 	})
 
-	// Three deliberate comments in a row, before any run starts.
-	cidA := postComment(t, issueID, "First instruction", nil)
-	cidB := postComment(t, issueID, "Second, correcting the first", nil)
-	cidC := postComment(t, issueID, "Third, one more detail", nil)
+	// Three explicit instructions in the same thread, before any run starts.
+	mention := fmt.Sprintf("[@Agent](mention://agent/%s) ", agentID)
+	cidA := postComment(t, issueID, mention+"First instruction", nil)
+	cidB := postComment(t, issueID, mention+"Second, correcting the first", &cidA)
+	cidC := postComment(t, issueID, mention+"Third, one more detail", &cidA)
 
-	// Still exactly one task: we bound concurrency to one run per (issue,agent).
+	// Still exactly one pending task for this (issue, agent, thread).
 	if n := countPendingTasksForAgent(t, issueID, agentID); n != 1 {
 		t.Fatalf("expected exactly 1 pending task after 3 comments, got %d", n)
 	}
@@ -147,14 +149,18 @@ func TestGetLatestMemberCommentForIssueSince(t *testing.T) {
 
 // insertCommentAt inserts a comment with an explicit created_at and author, and
 // returns its id. Used to construct precise before/after-anchor scenarios.
-func insertCommentAt(t *testing.T, issueID, authorType, authorID, content string, at time.Time) string {
+func insertCommentAt(t *testing.T, issueID, authorType, authorID, content string, at time.Time, parentIDs ...string) string {
 	t.Helper()
 	var id string
+	var parentID *string
+	if len(parentIDs) > 0 {
+		parentID = &parentIDs[0]
+	}
 	err := testPool.QueryRow(context.Background(), `
-		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, 'comment', $6, $6)
+		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type, created_at, updated_at, parent_id)
+		VALUES ($1, $2, $3, $4, $5, 'comment', $6, $6, $7)
 		RETURNING id::text
-	`, issueID, testWorkspaceID, authorType, authorID, content, at).Scan(&id)
+	`, issueID, testWorkspaceID, authorType, authorID, content, at, parentID).Scan(&id)
 	if err != nil {
 		t.Fatalf("insertCommentAt: %v", err)
 	}
@@ -211,7 +217,7 @@ func TestMergeCommentIntoPendingTask_RecomputesOriginatorAndSkipsDispatched(t *t
 
 	now := time.Now()
 	cidA := insertCommentAt(t, issueID, "member", testUserID, "first, from originator A", now.Add(-2*time.Minute))
-	cidB := insertCommentAt(t, issueID, "member", testUserID, "second, folds in", now.Add(-1*time.Minute))
+	cidB := insertCommentAt(t, issueID, "member", testUserID, "second, folds in", now.Add(-1*time.Minute), cidA)
 
 	// A second member to act as a DIFFERENT originator.
 	otherUserID := createWorkspaceMember(t, "merge-recompute-other")
@@ -222,8 +228,8 @@ func TestMergeCommentIntoPendingTask_RecomputesOriginatorAndSkipsDispatched(t *t
 	}
 	// Seed a queued task originated by testUserID and triggered by cidA.
 	if _, err := testPool.Exec(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, trigger_comment_id, status, priority, originator_user_id)
-		VALUES ($1, $2, $3, $4, 'queued', 0, $5)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, trigger_comment_id, status, priority, originator_user_id, accountable_user_id)
+		VALUES ($1, $2, $3, $4, 'queued', 0, $5, $5)
 	`, agentID, runtimeID, issueID, cidA, testUserID); err != nil {
 		t.Fatalf("seed queued task: %v", err)
 	}
@@ -234,11 +240,12 @@ func TestMergeCommentIntoPendingTask_RecomputesOriginatorAndSkipsDispatched(t *t
 	// A DIFFERENT originator (userB) now MERGES (no gate): trigger repointed to
 	// cidB, originator re-stamped to userB, cidA preserved as coalesced.
 	if _, err := queries.MergeCommentIntoPendingTask(ctx, db.MergeCommentIntoPendingTaskParams{
-		IssueID:             pgIssue,
-		AgentID:             pgAgent,
-		NewTriggerCommentID: toPgUUID(t, cidB),
-		NewOriginatorUserID: toPgUUID(t, otherUserID),
-		NewTriggerSummary:   pgtype.Text{String: "second, folds in", Valid: true},
+		IssueID:              pgIssue,
+		AgentID:              pgAgent,
+		NewTriggerCommentID:  toPgUUID(t, cidB),
+		NewOriginatorUserID:  toPgUUID(t, otherUserID),
+		NewAccountableUserID: toPgUUID(t, otherUserID),
+		NewTriggerSummary:    pgtype.Text{String: "second, folds in", Valid: true},
 	}); err != nil {
 		t.Fatalf("recompute merge should succeed for a different originator, got %v", err)
 	}
@@ -258,13 +265,14 @@ func TestMergeCommentIntoPendingTask_RecomputesOriginatorAndSkipsDispatched(t *t
 	if _, err := testPool.Exec(ctx, `UPDATE agent_task_queue SET status = 'dispatched', dispatched_at = now() WHERE issue_id = $1`, issueID); err != nil {
 		t.Fatalf("flip task to dispatched: %v", err)
 	}
-	cidC := insertCommentAt(t, issueID, "member", testUserID, "third, arrives after dispatch", now)
+	cidC := insertCommentAt(t, issueID, "member", testUserID, "third, arrives after dispatch", now, cidA)
 	if _, err := queries.MergeCommentIntoPendingTask(ctx, db.MergeCommentIntoPendingTaskParams{
-		IssueID:             pgIssue,
-		AgentID:             pgAgent,
-		NewTriggerCommentID: toPgUUID(t, cidC),
-		NewOriginatorUserID: toPgUUID(t, testUserID),
-		NewTriggerSummary:   pgtype.Text{String: "third", Valid: true},
+		IssueID:              pgIssue,
+		AgentID:              pgAgent,
+		NewTriggerCommentID:  toPgUUID(t, cidC),
+		NewOriginatorUserID:  toPgUUID(t, testUserID),
+		NewAccountableUserID: toPgUUID(t, testUserID),
+		NewTriggerSummary:    pgtype.Text{String: "third", Valid: true},
 	}); err != pgx.ErrNoRows {
 		t.Fatalf("merge into a dispatched task must return pgx.ErrNoRows, got %v", err)
 	}
@@ -337,8 +345,8 @@ func TestMergeCommentIntoPendingTask_TargetsQueuedNotDeferred(t *testing.T) {
 
 	now := time.Now()
 	cidQueued := insertCommentAt(t, issueID, "member", testUserID, "queued task trigger", now.Add(-3*time.Minute))
-	cidDeferred := insertCommentAt(t, issueID, "member", testUserID, "deferred fallback trigger", now.Add(-2*time.Minute))
-	cidNew := insertCommentAt(t, issueID, "member", testUserID, "new comment, must fold into queued", now.Add(-1*time.Minute))
+	cidDeferred := insertCommentAt(t, issueID, "member", testUserID, "deferred fallback trigger", now.Add(-2*time.Minute), cidQueued)
+	cidNew := insertCommentAt(t, issueID, "member", testUserID, "new comment, must fold into queued", now.Add(-1*time.Minute), cidQueued)
 
 	var runtimeID string
 	if err := testPool.QueryRow(ctx, `SELECT runtime_id FROM agent WHERE id = $1`, agentID).Scan(&runtimeID); err != nil {
@@ -365,11 +373,12 @@ func TestMergeCommentIntoPendingTask_TargetsQueuedNotDeferred(t *testing.T) {
 	}
 
 	row, err := queries.MergeCommentIntoPendingTask(ctx, db.MergeCommentIntoPendingTaskParams{
-		IssueID:             toPgUUID(t, issueID),
-		AgentID:             toPgUUID(t, agentID),
-		NewTriggerCommentID: toPgUUID(t, cidNew),
-		NewOriginatorUserID: toPgUUID(t, testUserID),
-		NewTriggerSummary:   pgtype.Text{String: "new comment", Valid: true},
+		IssueID:              toPgUUID(t, issueID),
+		AgentID:              toPgUUID(t, agentID),
+		NewTriggerCommentID:  toPgUUID(t, cidNew),
+		NewOriginatorUserID:  toPgUUID(t, testUserID),
+		NewAccountableUserID: toPgUUID(t, testUserID),
+		NewTriggerSummary:    pgtype.Text{String: "new comment", Valid: true},
 	})
 	if err != nil {
 		t.Fatalf("merge should target the queued task, got %v", err)

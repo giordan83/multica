@@ -1,14 +1,22 @@
 import {
   getShortcutPlatform,
+  getShortcutRuntime,
   type ShortcutPlatform,
+  type ShortcutRuntime,
 } from "./platform";
 
 export type ShortcutActionId =
   | "openSearch"
   | "createIssue"
   | "toggleSidebar"
+  | "toggleRightSidebar"
+  | "toggleChat"
+  | "newChat"
   | "findInIssue"
+  | "archiveInboxItem"
   | "send"
+  | "goBack"
+  | "goForward"
   | "goInbox"
   | "goChat"
   | "goMyIssues"
@@ -73,8 +81,42 @@ export const SHORTCUT_ACTIONS: readonly ShortcutActionDefinition[] = [
   { id: "openSearch", category: "general", defaultShortcut: primary("K"), allowInEditable: true },
   { id: "createIssue", category: "general", defaultShortcut: createShortcutChord("C"), allowInEditable: false },
   { id: "toggleSidebar", category: "general", defaultShortcut: primary("B"), allowInEditable: false },
+  {
+    id: "toggleRightSidebar",
+    category: "general",
+    defaultShortcut: primary("/"),
+    allowInEditable: false,
+  },
+  // Mod+J follows the "toggle a docked panel" convention, and is one of the few
+  // letters this module's own policy leaves free on every platform and runtime:
+  // it is neither app-owned (PRIMARY_RESERVED_KEYS) nor browser-owned
+  // (BROWSER_ONLY_PRIMARY_RESERVED_KEYS). `allowInEditable` because the point of
+  // the binding is reaching — and dismissing — chat without a mouse, which has
+  // to keep working while the caret sits in the chat composer itself.
+  { id: "toggleChat", category: "general", defaultShortcut: primary("J"), allowInEditable: true },
+  // Ask Multica from the keyboard: Shift on the chat toggle, so the two chat
+  // chords sit together. Shift+J is outside every reserved set, as is Mod+J.
+  {
+    id: "newChat",
+    category: "general",
+    defaultShortcut: createShortcutChord("J", { primary: true, shift: true }),
+    allowInEditable: true,
+  },
   { id: "findInIssue", category: "general", defaultShortcut: primary("F"), allowInEditable: true },
+  {
+    id: "archiveInboxItem",
+    category: "general",
+    defaultShortcut: createShortcutChord("E"),
+    allowInEditable: false,
+  },
   { id: "send", category: "general", defaultShortcut: primary("Enter"), allowInEditable: true },
+  // Browser-style history navigation (Mod+[ / Mod+]). Neither bracket is
+  // app-owned (PRIMARY_RESERVED_KEYS) nor browser-owned
+  // (BROWSER_ONLY_PRIMARY_RESERVED_KEYS), so both are recordable on every
+  // platform and runtime. `allowInEditable` is false so the chord never steps
+  // away from the page while the caret sits in an input, textarea, or editor.
+  { id: "goBack", category: "navigation", defaultShortcut: primary("["), allowInEditable: false },
+  { id: "goForward", category: "navigation", defaultShortcut: primary("]"), allowInEditable: false },
   { id: "goInbox", category: "navigation", defaultShortcut: null, allowInEditable: false },
   { id: "goChat", category: "navigation", defaultShortcut: null, allowInEditable: false },
   { id: "goMyIssues", category: "navigation", defaultShortcut: null, allowInEditable: false },
@@ -112,6 +154,8 @@ const KEY_LABELS: Record<string, string> = {
 };
 
 function eventKey(event: KeyboardEvent): string | null {
+  // Synthetic events (e.g. Chrome autofill) may omit `key` entirely.
+  if (typeof event.key !== "string") return null;
   if (MODIFIER_KEYS.has(event.key) || NON_ACTIONABLE_KEYS.has(event.key)) return null;
   const key = KEY_LABELS[event.key] ?? event.key;
   if (key.length === 1 && /[a-z]/i.test(key)) return key.toUpperCase();
@@ -235,22 +279,67 @@ export function isEditableShortcutTarget(target: EventTarget | null): boolean {
   );
 }
 
+const PORTAL_LAYER_SELECTOR =
+  '[role="menu"], [role="dialog"], [role="alertdialog"], [role="listbox"]';
+
+/**
+ * Whether an open popup (menu, dialog, listbox) owns the keyboard. Popups are
+ * portaled to the body, so page-level listeners still see their keypresses;
+ * the `data-base-ui-inert` marker catches modal layers even when focus never
+ * left the page.
+ */
+export function isPortalLayerShortcutTarget(target: EventTarget | null): boolean {
+  if (typeof document === "undefined") return false;
+  if (document.querySelector("[data-base-ui-inert]") !== null) return true;
+  return target instanceof Element && target.closest(PORTAL_LAYER_SELECTOR) !== null;
+}
+
 const PRIMARY_RESERVED_KEYS = new Set([
-  // Window/browser operations.
-  "W", "R", "L", "T", "N", "P", "Q", "D", "U",
+  // Window operations the app itself owns on every runtime: W closes the
+  // tab, R/F5 is the reload guard, Q quits.
+  "W", "R", "Q",
+  // Preferences: the desktop app opens Settings from the main process, and on
+  // web the browser opens its own settings — neither leaves the chord free for
+  // a product action.
+  ",",
   // Fundamental editing operations should never become product actions.
   "A", "C", "V", "X", "Y", "Z",
+  // Zoom accelerators: fixed app shortcuts on desktop, browser zoom on web.
   "Equals", "Plus", "Minus", "Underscore", "0",
+  // Browser-style direct tab selection: browsers own these on web and the
+  // desktop main process owns them for product tabs. Keeping them reserved
+  // also sanitizes any conflicting shortcut override persisted by an older
+  // app version.
+  "1", "2", "3", "4", "5", "6", "7", "8", "9",
 ]);
 
-/** Browser/window/OS accelerators that cannot be reliably owned by the app. */
+// Accelerators owned by the browser UI around a tab: print, address bar,
+// new tab/window, bookmark, view source. A web page cannot reliably own
+// them, but the Electron renderer receives the bare primary chords as plain
+// keydowns — neither Electron's default menu nor the desktop shell binds
+// any of them — so exactly those are recordable on desktop (MUL-4457).
+// Variants with extra modifiers stay reserved on both runtimes: several
+// belong to the OS or window manager (Option+Cmd+D toggles the macOS Dock,
+// Ctrl+Alt+T opens a terminal on common Linux desktops), which even the
+// desktop app cannot own.
+const BROWSER_ONLY_PRIMARY_RESERVED_KEYS = new Set([
+  "P", "L", "T", "N", "D", "U",
+]);
+
+/** Browser/window/OS accelerators the app cannot reliably own in `runtime`. */
 export function isReservedShortcut(
   shortcut: ShortcutChord,
   platform: ShortcutPlatform = getShortcutPlatform(),
+  runtime: ShortcutRuntime = getShortcutRuntime(),
 ): boolean {
   const { modifiers, key } = shortcut;
   if (key === "F5") return true;
   if (modifiers.primary && PRIMARY_RESERVED_KEYS.has(key)) return true;
+  if (modifiers.primary && BROWSER_ONLY_PRIMARY_RESERVED_KEYS.has(key)) {
+    const barePrimary =
+      !modifiers.control && !modifiers.meta && !modifiers.alt && !modifiers.shift;
+    if (runtime !== "desktop" || !barePrimary) return true;
+  }
 
   if (platform === "macos") {
     if (modifiers.primary && (key === "Space" || key === "Tab" || key === "M" || key === "H")) return true;
@@ -292,9 +381,10 @@ export function isShortcutAllowedForAction(
   actionId: ShortcutActionId,
   shortcut: ShortcutChord,
   platform: ShortcutPlatform = getShortcutPlatform(),
+  runtime: ShortcutRuntime = getShortcutRuntime(),
 ): boolean {
   if (!isShortcutChordActionable(shortcut)) return false;
-  if (isReservedShortcut(shortcut, platform)) return false;
+  if (isReservedShortcut(shortcut, platform, runtime)) return false;
   // Tab is focus navigation (and Ctrl+Tab is browser tab navigation) on every
   // supported platform. It is never a dependable product-level binding.
   if (shortcut.key === "Tab") return false;

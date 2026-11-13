@@ -6,22 +6,12 @@ import {
   useState,
   type RefObject,
 } from "react";
-import { motion, useReducedMotion } from "motion/react";
-import {
-  Inbox,
-  CircleUser,
-  ListTodo,
-  Bot,
-  Monitor,
-  BookOpenText,
-  Settings,
-  X,
-  Plus,
-  Pin,
-  PinOff,
-  ListX,
-  type LucideIcon,
-} from "lucide-react";
+import { motion } from "motion/react";
+import { useReducedMotion } from "@multica/core/appearance";
+import { toast } from "sonner";
+import { X, Plus, Pin, PinOff, ListX, ListEnd, AppWindow, Link2 } from "@multica/ui/icons";
+import { copyText } from "@multica/ui/lib/clipboard";
+import { useNavigation } from "@multica/views/navigation";
 import {
   DndContext,
   PointerSensor,
@@ -47,25 +37,17 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@multica/ui/components/ui/context-menu";
+import { TooltipHint } from "@multica/ui/components/common/tooltip-hint";
 import { useScrollFade } from "@multica/ui/hooks/use-scroll-fade";
 import { cn } from "@multica/ui/lib/utils";
-import {
-  useTabStore,
-  useActiveGroup,
-  resolveRouteIcon,
-  type Tab,
-} from "@/stores/tab-store";
+import { useTabStore, useActiveGroup, type Tab } from "@/stores/tab-store";
 import { paths } from "@multica/core/paths";
-
-const TAB_ICONS: Record<string, LucideIcon> = {
-  Inbox,
-  CircleUser,
-  ListTodo,
-  Bot,
-  Monitor,
-  BookOpenText,
-  Settings,
-};
+import { useT } from "@multica/views/i18n";
+import {
+  useTabPresentation,
+  ResourceLeadingVisual,
+} from "@multica/views/layout";
+import { parseIssueWindowPath } from "../../../shared/issue-window";
 
 const TAB_SCROLL_FADE_SIZE = 24;
 const TAB_ENTRY_EASE = [0.22, 1, 0.36, 1] as const;
@@ -156,6 +138,7 @@ function SortableTabItem({
   isActive,
   isOnly,
   canCloseOthers,
+  canCloseRight,
   isNew,
   shouldReduceMotion,
 }: {
@@ -168,13 +151,44 @@ function SortableTabItem({
    */
   isOnly: boolean;
   canCloseOthers: boolean;
+  canCloseRight: boolean;
   isNew: boolean;
   shouldReduceMotion: boolean;
 }) {
+  const { t } = useT("settings");
   const setActiveTab = useTabStore((s) => s.setActiveTab);
   const closeTab = useTabStore((s) => s.closeTab);
   const closeOtherTabs = useTabStore((s) => s.closeOtherTabs);
+  const closeTabsToRight = useTabStore((s) => s.closeTabsToRight);
+  const { getShareableUrl } = useNavigation();
   const togglePin = useTabStore((s) => s.togglePin);
+  const updateTab = useTabStore((s) => s.updateTab);
+  const issueWindowPath = parseIssueWindowPath(tab.url);
+
+  // The tab's leading visual and title are derived live from its URL and the
+  // query cache — a resource's own icon/status/avatar and its real title,
+  // updated as the cache updates. `tab.title` is only a persisted first-frame
+  // fallback. See @multica/views useTabPresentation.
+  const { visual, title, titleResolved } = useTabPresentation(tab.url, tab.title, { fetch: true });
+  const pinLabel = tab.pinned
+    ? t(($) => $.desktop.tab_bar.unpin)
+    : t(($) => $.desktop.tab_bar.pin);
+  const closeLabel = t(($) => $.desktop.tab_bar.close);
+  const closeOthersLabel = t(($) => $.desktop.tab_bar.close_others);
+  const openWindowLabel = t(($) => $.desktop.tab_bar.open_window);
+  const tabName = tab.pinned
+    ? t(($) => $.desktop.tab_bar.pinned_name, { title })
+    : title;
+
+  // Persist each tab's resolved title so it survives as the next
+  // session's first-frame fallback. The tab strip itself always renders the
+  // live resolved `title`; `tab.title` is just the persisted seed. This
+  // replaces the old document.title → MutationObserver → tab.title path (the OS
+  // window title stays page-driven via useDocumentTitle).
+  useEffect(() => {
+    if (!titleResolved) return;
+    if (tab.title !== title) updateTab(tab.id, { title });
+  }, [titleResolved, title, tab.id, tab.title, updateTab]);
 
   const {
     attributes,
@@ -185,17 +199,15 @@ function SortableTabItem({
     isDragging,
   } = useSortable({ id: tab.id });
 
-  // Pinned tabs swap the route icon for a Pin glyph as the static "I am
-  // pinned" indicator (RFC §3 D1v-iv FINAL). The route information is still
-  // present in the title, and this avoids a hard left accent border that read
-  // as visually heavy in light mode.
-  const LeadingIcon = tab.pinned ? Pin : TAB_ICONS[tab.icon];
-
+  // Pin is a secondary interaction state, not an identity: a pinned tab keeps
+  // its resource visual (a project's icon, an issue's status, an actor's
+  // avatar) rather than collapsing to a Pin glyph. Pinned-ness is conveyed by
+  // position, the suppressed close button, and the hover Pin/Unpin action.
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
     WebkitAppRegion: "no-drag",
-    zIndex: isDragging ? 10 : undefined,
+    zIndex: isDragging ? 20 : undefined,
   } as React.CSSProperties;
 
   const handleClick = () => {
@@ -217,10 +229,25 @@ function SortableTabItem({
     e.stopPropagation();
   };
 
+  const handleCopyLink = () => {
+    void copyText(getShareableUrl(tab.url)).then((ok) => {
+      if (ok) toast.success(t(($) => $.desktop.tab_bar.link_copied));
+    });
+  };
+
+  const handleOpenAsWindow = () => {
+    if (!issueWindowPath) return;
+    void window.desktopAPI.openIssueWindow({
+      path: issueWindowPath.path,
+      title,
+    });
+  };
+
   // Pinned tabs keep their full title (RFC §3 D1v-ii FINAL). The only visual
-  // differences vs. unpinned tabs are the leading Pin icon (swapped in above)
-  // and the suppressed X (closing requires explicit Unpin). Pin/Unpin is
-  // reachable via the hover action button below and the right-click menu.
+  // differences vs. unpinned tabs are the suppressed X (closing requires
+  // explicit Unpin) — the leading visual is the resource's own identity, same
+  // as an unpinned tab. Pin/Unpin is reachable via the hover action button
+  // below and the right-click menu.
   const showCloseButton = !tab.pinned && !isOnly;
   const [isEntering, setIsEntering] = useState(isNew && !shouldReduceMotion);
   const [showAddedHighlight, setShowAddedHighlight] = useState(isNew);
@@ -237,21 +264,27 @@ function SortableTabItem({
       {...attributes}
       {...listeners}
       onClick={handleClick}
-      aria-label={tab.pinned ? `${tab.title} (pinned)` : tab.title}
+      // Browser convention: middle click closes the tab. Pinned (and sole)
+      // tabs suppress the close affordance, so middle click follows suit.
+      onAuxClick={(e) => {
+        if (e.button !== 1 || !showCloseButton) return;
+        e.preventDefault();
+        handleClose(e);
+      }}
+      aria-label={tabName}
       data-tab-active={isActive ? "true" : undefined}
       data-tab-entering={isEntering ? "true" : undefined}
-      title={tab.pinned ? `${tab.title} (pinned)` : undefined}
       style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
       className={cn(
-        "group flex size-full min-w-0 items-center gap-1.5 rounded-md px-2 text-xs transition-colors",
+        "group relative flex size-full min-w-0 items-center gap-1.5 px-2.5 text-caption transition-colors",
         "select-none cursor-default",
         isActive
-          ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
-          : "bg-sidebar-accent/50 text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+          ? "text-foreground"
+          : "text-muted-foreground hover:text-foreground",
         isDragging && "opacity-60",
       )}
     >
-      {LeadingIcon && <LeadingIcon className="size-3.5 shrink-0" />}
+      <ResourceLeadingVisual visual={visual} />
       <span
         className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-left"
         style={{
@@ -259,14 +292,14 @@ function SortableTabItem({
           WebkitMaskImage: "linear-gradient(to right, black calc(100% - 12px), transparent)",
         }}
       >
-        {tab.title}
+        {title}
       </span>
       <span
         onClick={handleTogglePin}
         onPointerDown={stopDragOnAction}
         role="button"
-        aria-label={tab.pinned ? "Unpin tab" : "Pin tab"}
-        title={tab.pinned ? "Unpin tab" : "Pin tab"}
+        aria-label={pinLabel}
+        title={pinLabel}
         className="hidden size-3.5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors group-hover:flex hover:bg-muted-foreground/20 hover:text-foreground"
       >
         {tab.pinned ? <PinOff className="size-2.5" /> : <Pin className="size-2.5" />}
@@ -276,7 +309,7 @@ function SortableTabItem({
           onClick={handleClose}
           onPointerDown={stopDragOnAction}
           role="button"
-          aria-label="Close tab"
+          aria-label={closeLabel}
           className="hidden size-3.5 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors group-hover:flex hover:bg-muted-foreground/20 hover:text-foreground"
         >
           <X className="size-2.5" />
@@ -291,30 +324,58 @@ function SortableTabItem({
       style={style}
       data-tab-frame
       data-tab-id={tab.id}
-      className="h-7 w-40 min-w-32"
+      className={cn("h-full w-56 min-w-32", isActive && "z-10")}
     >
       <motion.div
-        className="relative size-full"
+        className="group/tab relative size-full"
         initial={isEntering ? { opacity: 0, x: 8 } : false}
         animate={{ opacity: 1, x: 0 }}
         transition={{ duration: isEntering ? 0.18 : 0, ease: TAB_ENTRY_EASE }}
         onAnimationComplete={() => setIsEntering(false)}
       >
+        {/* Every tab is a pill on the title bar; the active one is made of
+            the content card's own material so it reads as the card's tab
+            without having to join it. */}
+        <span
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute inset-x-0 inset-y-1.5 rounded-lg transition-colors",
+            isActive
+              ? "bg-page-canvas shadow-[var(--surface-shadow)] ring-1 ring-surface-border"
+              : "bg-page-canvas/50 group-hover/tab:bg-page-canvas/80",
+            isDragging && "opacity-60",
+          )}
+        />
         <ContextMenu>
-          <ContextMenuTrigger render={tabButton} />
+          <TooltipHint label={tab.pinned ? tabName : undefined} side="bottom">
+            <ContextMenuTrigger render={tabButton} />
+          </TooltipHint>
           <ContextMenuContent>
+            {issueWindowPath && (
+              <>
+                <ContextMenuItem onClick={handleOpenAsWindow}>
+                  <AppWindow />
+                  {openWindowLabel}
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+              </>
+            )}
             <ContextMenuItem onClick={() => togglePin(tab.id)}>
               {tab.pinned ? (
                 <>
                   <PinOff />
-                  Unpin tab
+                  {pinLabel}
                 </>
               ) : (
                 <>
                   <Pin />
-                  Pin tab
+                  {pinLabel}
                 </>
               )}
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleCopyLink}>
+              <Link2 />
+              {t(($) => $.desktop.tab_bar.copy_link)}
             </ContextMenuItem>
             <ContextMenuSeparator />
             <ContextMenuItem
@@ -323,7 +384,7 @@ function SortableTabItem({
               onClick={() => closeTab(tab.id)}
             >
               <X />
-              Close tab
+              {closeLabel}
             </ContextMenuItem>
             <ContextMenuItem
               variant="destructive"
@@ -331,14 +392,22 @@ function SortableTabItem({
               onClick={() => closeOtherTabs(tab.id)}
             >
               <ListX />
-              Close other tabs
+              {closeOthersLabel}
+            </ContextMenuItem>
+            <ContextMenuItem
+              variant="destructive"
+              disabled={!canCloseRight}
+              onClick={() => closeTabsToRight(tab.id)}
+            >
+              <ListEnd />
+              {t(($) => $.desktop.tab_bar.close_right)}
             </ContextMenuItem>
           </ContextMenuContent>
         </ContextMenu>
         {showAddedHighlight && (
           <motion.span
             aria-hidden
-            className="pointer-events-none absolute inset-0 rounded-md bg-primary/10 ring-1 ring-inset ring-primary/20"
+            className="pointer-events-none absolute inset-x-0 inset-y-1.5 rounded-lg bg-primary/10 ring-1 ring-inset ring-primary/20"
             initial={{ opacity: shouldReduceMotion ? 0.25 : 0.65 }}
             animate={{ opacity: 0 }}
             transition={{ duration: shouldReduceMotion ? 0.16 : 0.42 }}
@@ -384,7 +453,7 @@ function NewTabEdgeFeedback({
       key={`${signal.tabId}-${signal.sequence}`}
       aria-hidden
       data-new-tab-edge-feedback="true"
-      className="pointer-events-none absolute inset-y-2 right-0 z-20 w-8 rounded-r-md bg-gradient-to-l from-primary/35 via-primary/10 to-transparent"
+      className="pointer-events-none absolute inset-y-1.5 right-0 z-20 w-8 rounded-r-lg bg-gradient-to-l from-primary/35 via-primary/10 to-transparent"
       initial={{
         opacity: shouldReduceMotion ? 0.45 : 0,
         x: shouldReduceMotion ? 0 : 4,
@@ -414,8 +483,10 @@ function NewTabEdgeFeedback({
 }
 
 function NewTabButton() {
+  const { t } = useT("settings");
   const addTab = useTabStore((s) => s.addTab);
   const setActiveTab = useTabStore((s) => s.setActiveTab);
+  const newTabLabel = t(($) => $.desktop.tab_bar.new);
 
   const handleClick = () => {
     // New tab opens in the currently active workspace — tabs are scoped
@@ -423,21 +494,22 @@ function NewTabButton() {
     const activeSlug = useTabStore.getState().activeWorkspaceSlug;
     if (!activeSlug) return;
     const path = paths.workspace(activeSlug).issues();
-    const tabId = addTab(path, "Issues", resolveRouteIcon(path));
+    const tabId = addTab(path, "Issues");
     if (tabId) setActiveTab(tabId);
   };
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      aria-label="New tab"
-      title="New tab"
-      style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-      className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-muted/50 hover:text-muted-foreground"
-    >
-      <Plus className="size-3.5" />
-    </button>
+    <TooltipHint label={newTabLabel} side="bottom">
+      <button
+        type="button"
+        onClick={handleClick}
+        aria-label={newTabLabel}
+        style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+        className="flex size-7 shrink-0 items-center justify-center self-center rounded-md text-faint-foreground transition-colors hover:bg-muted/50 hover:text-muted-foreground"
+      >
+        <Plus className="size-3.5" />
+      </button>
+    </TooltipHint>
   );
 }
 
@@ -445,7 +517,7 @@ export function TabBar() {
   const group = useActiveGroup();
   const moveTab = useTabStore((s) => s.moveTab);
   const activeWorkspaceSlug = useTabStore((s) => s.activeWorkspaceSlug);
-  const shouldReduceMotion = useReducedMotion() ?? false;
+  const shouldReduceMotion = useReducedMotion();
   const tabScrollRef = useRef<HTMLDivElement>(null);
   const previousTabsRef = useRef<TabSnapshot | null>(null);
   const tabFadeStyle = useScrollFade(
@@ -456,7 +528,12 @@ export function TabBar() {
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
-      activationConstraint: { distance: 5 },
+      // `tolerance` cancels a press whose first move already lands far away,
+      // so it stays a click. In macOS native full screen on a secondary
+      // display, Electron sends exactly such a move right after a press near
+      // the top of the window (electron/electron#55100); started as a drag,
+      // it would swallow the tab click.
+      activationConstraint: { distance: 5, tolerance: 100 },
     }),
   );
 
@@ -536,7 +613,7 @@ export function TabBar() {
   };
 
   return (
-    <div className="flex h-full w-full min-w-0 max-w-full items-center justify-start gap-0.5 px-2">
+    <div className="flex h-full w-full min-w-0 max-w-full items-center justify-start gap-1.5 px-2">
       <div className="relative flex h-full min-w-0 flex-1 items-center">
         <DndContext
           sensors={sensors}
@@ -544,10 +621,11 @@ export function TabBar() {
           modifiers={[restrictToHorizontalAxis, restrictToParentElement]}
           onDragEnd={handleDragEnd}
         >
+          {/* px-px keeps the active pill's ring inside the scroller's clip. */}
           <div
             ref={tabScrollRef}
             data-tab-scroll-container
-            className="no-scrollbar flex h-full min-w-0 flex-1 items-center gap-0.5 overflow-x-auto overflow-y-hidden overscroll-x-contain"
+            className="no-scrollbar flex h-full min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overflow-y-hidden overscroll-x-contain px-px"
             style={tabFadeStyle}
           >
             <SortableContext items={tabIds} strategy={horizontalListSortingStrategy}>
@@ -560,6 +638,9 @@ export function TabBar() {
                     canCloseOthers={tabs.some(
                       (candidate) => candidate.id !== tab.id && !candidate.pinned,
                     )}
+                    canCloseRight={tabs.some(
+                      (candidate, i) => i > index && !candidate.pinned,
+                    )}
                     isNew={addedTabIdSet.has(tab.id)}
                     shouldReduceMotion={shouldReduceMotion}
                   />
@@ -568,7 +649,7 @@ export function TabBar() {
                     unpinnedCount > 0 && (
                       <div
                         aria-hidden
-                        className="mx-1 h-4 w-px shrink-0 bg-border"
+                        className="h-4 w-px shrink-0 bg-surface-border"
                       />
                     )}
                 </Fragment>

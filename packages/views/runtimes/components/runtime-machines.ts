@@ -15,8 +15,11 @@ export interface RuntimeMachine {
   daemonId: string | null;
   title: string;
   subtitle: string | null;
+  /** Compact OS/arch summary without the daemon-id fallback of `subtitle`. */
+  deviceSummary: string | null;
   deviceInfo: string | null;
   cliVersion: string | null;
+  launchedBy: string | null;
   mode: AgentRuntime["runtime_mode"];
   section: RuntimeMachineSection;
   isCurrent: boolean;
@@ -65,7 +68,7 @@ const HEALTH_SEVERITY: Record<RuntimeHealth, number> = {
   online: 0,
   recently_lost: 1,
   offline: 2,
-  about_to_gc: 3,
+  long_offline: 3,
 };
 
 export function splitRuntimeName(name: string): {
@@ -131,8 +134,10 @@ function placeholderLocalMachine(
     daemonId,
     title: options.localMachineName ?? "This machine",
     subtitle: null,
+    deviceSummary: null,
     deviceInfo: null,
     cliVersion: null,
+    launchedBy: null,
     mode: "local",
     section: "local",
     isCurrent: true,
@@ -173,6 +178,11 @@ export function filterRuntimeMachines(
 
     return haystack.includes(q);
   });
+}
+
+/** Number of machines `buildRuntimeMachines` would group these runtimes into. */
+export function countRuntimeMachines(runtimes: AgentRuntime[]): number {
+  return new Set(runtimes.map(runtimeMachineId)).size;
 }
 
 export function runtimeMachineCounts(machines: RuntimeMachine[]): {
@@ -251,8 +261,10 @@ function finalizeRuntimeMachine(
     daemonId: draft.daemonId,
     title,
     subtitle,
+    deviceSummary: compactDeviceInfo(deviceInfo, title),
     deviceInfo,
-    cliVersion: commonCliVersion(runtimes),
+    cliVersion: currentMachineMetadata(runtimes, "cli_version"),
+    launchedBy: currentMachineMetadata(runtimes, "launched_by"),
     mode: draft.mode,
     section: isCurrent ? "local" : draft.mode === "cloud" ? "cloud" : "remote",
     isCurrent,
@@ -383,15 +395,28 @@ function latestLastSeenAt(runtimes: AgentRuntime[]): string | null {
   return latest;
 }
 
-function commonCliVersion(runtimes: AgentRuntime[]): string | null {
-  const versions = new Set<string>();
-  for (const runtime of runtimes) {
-    const version = runtime.metadata?.cli_version;
-    if (typeof version === "string" && version.trim()) {
-      versions.add(version.trim());
-    }
+function currentMachineMetadata(
+  runtimes: AgentRuntime[],
+  key: "cli_version" | "launched_by",
+): string | null {
+  const online = runtimes.filter((runtime) => runtime.status === "online");
+  const candidates = online.length > 0 ? online : runtimes;
+
+  for (const runtime of candidates.toSorted(compareRuntimeReports)) {
+    const value = runtime.metadata?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
   }
-  return versions.size === 1 ? Array.from(versions)[0] ?? null : null;
+  return null;
+}
+
+function compareRuntimeReports(a: AgentRuntime, b: AgentRuntime): number {
+  return runtimeReportTime(b) - runtimeReportTime(a);
+}
+
+function runtimeReportTime(runtime: AgentRuntime): number {
+  const reportedAt = runtime.last_seen_at ?? runtime.updated_at;
+  const timestamp = Date.parse(reportedAt);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function shortDaemonId(daemonId: string): string {

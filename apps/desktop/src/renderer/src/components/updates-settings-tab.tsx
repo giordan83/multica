@@ -1,8 +1,10 @@
-import { useCallback, useState } from "react";
-import { AlertCircle, ArrowDownToLine, Check, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { AlertCircle, ArrowDownToLine, Check, Loader2 } from "@multica/ui/icons";
 import { Button } from "@multica/ui/components/ui/button";
+import { Switch } from "@multica/ui/components/ui/switch";
 import { useT } from "@multica/views/i18n";
 import { SettingsCard, SettingsRow, SettingsTab } from "@multica/views/settings";
+import { toast } from "sonner";
 
 type CheckState =
   | { status: "idle" }
@@ -14,7 +16,48 @@ type CheckState =
 export function UpdatesSettingsTab() {
   const { t } = useT("settings");
   const [state, setState] = useState<CheckState>({ status: "idle" });
+  const [automaticUpdates, setAutomaticUpdates] = useState(true);
+  const [preferencesReady, setPreferencesReady] = useState(false);
+  const [savingPreference, setSavingPreference] = useState(false);
   const currentVersion = window.desktopAPI.appInfo.version;
+
+  useEffect(() => {
+    let mounted = true;
+    void window.updater
+      .getPreferences()
+      .then((preferences) => {
+        if (mounted) setAutomaticUpdates(preferences.automaticUpdates);
+      })
+      .catch(() => {
+        // The main process falls back to enabled when preferences cannot be
+        // read. Keep the same safe default if IPC itself becomes unavailable.
+      })
+      .finally(() => {
+        if (mounted) setPreferencesReady(true);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const handleAutomaticUpdatesChange = useCallback(
+    async (enabled: boolean) => {
+      setSavingPreference(true);
+      try {
+        const preferences = await window.updater.setAutomaticUpdates(enabled);
+        setAutomaticUpdates(preferences.automaticUpdates);
+        toast.success(t(($) => $.auto_save.toast_saved), {
+          id: "settings-auto-save",
+        });
+      } catch {
+        toast.error(t(($) => $.desktop.updates.automatic_updates_save_failed));
+      } finally {
+        setSavingPreference(false);
+      }
+    },
+    [t],
+  );
 
   const handleCheck = useCallback(async () => {
     setState({ status: "checking" });
@@ -33,13 +76,24 @@ export function UpdatesSettingsTab() {
   return (
     <SettingsTab
       title={t(($) => $.desktop.updates.title)}
-      description={t(($) => $.desktop.updates.description)}
     >
       <SettingsCard>
         <SettingsRow label={t(($) => $.desktop.updates.current_version)}>
-          <span className="font-mono text-xs text-muted-foreground">
+          <span className="font-mono text-caption text-muted-foreground">
             v{currentVersion}
           </span>
+        </SettingsRow>
+
+        <SettingsRow
+          label={t(($) => $.desktop.updates.automatic_updates_title)}
+          description={t(($) => $.desktop.updates.automatic_updates_description)}
+        >
+          <Switch
+            checked={automaticUpdates}
+            onCheckedChange={handleAutomaticUpdatesChange}
+            disabled={!preferencesReady || savingPreference}
+            aria-label={t(($) => $.desktop.updates.automatic_updates_title)}
+          />
         </SettingsRow>
 
         <SettingsRow
@@ -48,42 +102,44 @@ export function UpdatesSettingsTab() {
           description={
             <>
               <p>{t(($) => $.desktop.updates.check_section_description)}</p>
-            {state.status === "up-to-date" && (
-              <p className="mt-2 inline-flex items-center gap-1.5">
-                <Check className="size-3.5 text-success" />
-                {t(($) => $.desktop.updates.up_to_date)}
-              </p>
-            )}
-            {state.status === "available" && (
-              <p className="mt-2 inline-flex items-center gap-1.5">
-                <ArrowDownToLine className="size-3.5 text-primary" />
-                {t(($) => $.desktop.updates.downloading, { version: state.latestVersion })}
-              </p>
-            )}
-            {state.status === "error" && (
-              <p className="mt-2 inline-flex items-center gap-1.5 text-destructive">
-                <AlertCircle className="size-3.5" />
-                {state.message}
-              </p>
-            )}
+              {state.status === "up-to-date" && (
+                <p className="mt-2 inline-flex items-center gap-1.5">
+                  <Check className="size-3.5 text-success" />
+                  {t(($) => $.desktop.updates.up_to_date)}
+                </p>
+              )}
+              {state.status === "available" && (
+                <p className="mt-2 inline-flex items-center gap-1.5">
+                  <ArrowDownToLine className="size-3.5 text-primary" />
+                  {t(($) => $.desktop.updates.downloading, {
+                    version: state.latestVersion,
+                  })}
+                </p>
+              )}
+              {state.status === "error" && (
+                <p className="mt-2 inline-flex items-center gap-1.5 text-destructive">
+                  <AlertCircle className="size-3.5" />
+                  {state.message}
+                </p>
+              )}
             </>
           }
         >
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleCheck}
-              disabled={state.status === "checking"}
-            >
-              {state.status === "checking" ? (
-                <>
-                  <Loader2 className="size-3.5 animate-spin" />
-                  {t(($) => $.desktop.updates.checking)}
-                </>
-              ) : (
-                t(($) => $.desktop.updates.check_now)
-              )}
-            </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleCheck}
+            disabled={state.status === "checking"}
+          >
+            {state.status === "checking" ? (
+              <>
+                <Loader2 className="size-3.5 animate-spin" />
+                {t(($) => $.desktop.updates.checking)}
+              </>
+            ) : (
+              t(($) => $.desktop.updates.check_now)
+            )}
+          </Button>
         </SettingsRow>
       </SettingsCard>
     </SettingsTab>

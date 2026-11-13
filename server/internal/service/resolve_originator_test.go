@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/multica-ai/multica/server/internal/attribution"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/featureflags"
 	"github.com/multica-ai/multica/server/internal/runtimeapps"
@@ -18,28 +18,11 @@ import (
 	"github.com/multica-ai/multica/server/pkg/featureflag"
 )
 
-// newResolveOriginatorPool mirrors the local-postgres pattern used in
-// task_claim_race_test.go: skip when the test database is unreachable
-// instead of failing, so `go test ./...` stays usable in CI / clean
-// developer setups that don't run Postgres.
+// newResolveOriginatorPool returns the package's shared test pool; see
+// sharedTestPool.
 func newResolveOriginatorPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://multica:multica@localhost:5432/multica?sslmode=disable"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("database unavailable: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("database unreachable: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return sharedTestPool(t)
 }
 
 type stubOverlayBuilder struct {
@@ -196,9 +179,9 @@ func seedOriginatorFanout(t *testing.T, pool *pgxpool.Pool) (memberCommentID, ag
 	// row the resolver must follow back through comment.source_task_id.
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO agent_task_queue (
-			agent_id, runtime_id, issue_id, status, priority, originator_user_id
+			agent_id, runtime_id, issue_id, status, priority, originator_user_id, accountable_user_id
 		)
-		VALUES ($1, $2, $3, 'completed', 0, $4)
+		VALUES ($1, $2, $3, 'completed', 0, $4, $4)
 		RETURNING id
 	`, agentAID, runtimeID, issueID, userIDStr).Scan(&taskAIDStr); err != nil {
 		t.Fatalf("seed task A: %v", err)
@@ -269,6 +252,62 @@ func TestResolveOriginatorFromTriggerComment_AgentAuthoredInheritsFromParent(t *
 	}
 }
 
+// TestAttributionForIssueTask_SystemCommentFallsThroughToIssueProvenance covers
+// the Stage-completion cascade (MUL-4302; raised by Bohan). Closing the last
+// sub-issue in a Stage wakes the parent's assignee agent through a SYSTEM-authored
+// child-done comment that threads no actor. That system comment carries no human,
+// so attribution must NOT stop at it (which would degrade to owner_fallback, the
+// agent's own owner) — it must fall through to the PARENT issue's own provenance
+// and attribute to the human who caused the parent issue to exist. Here the parent
+// was created by an agent on behalf of userID (agent_create origin), so the woken
+// run is delegation-accountable to userID.
+func TestAttributionForIssueTask_SystemCommentFallsThroughToIssueProvenance(t *testing.T) {
+	pool := newResolveOriginatorPool(t)
+	_, _, parentTaskID, userID, _ := seedOriginatorFanout(t, pool)
+	ctx := context.Background()
+
+	// Plant a system-authored comment on the seed's issue (mirrors the child-done
+	// comment). Its issue/workspace are derived from the origin task's issue.
+	var issueIDStr, workspaceIDStr string
+	if err := pool.QueryRow(ctx, `
+		SELECT i.id::text, i.workspace_id::text
+		FROM agent_task_queue t JOIN issue i ON i.id = t.issue_id
+		WHERE t.id = $1
+	`, util.UUIDToString(parentTaskID)).Scan(&issueIDStr, &workspaceIDStr); err != nil {
+		t.Fatalf("load issue/workspace: %v", err)
+	}
+	var systemCommentIDStr string
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO comment (issue_id, workspace_id, author_type, author_id, content, type)
+		VALUES ($1, $2, 'system', '00000000-0000-0000-0000-000000000000', 'child done', 'system')
+		RETURNING id
+	`, issueIDStr, workspaceIDStr).Scan(&systemCommentIDStr); err != nil {
+		t.Fatalf("seed system comment: %v", err)
+	}
+	systemCommentID := util.MustParseUUID(systemCommentIDStr)
+
+	svc := &TaskService{Queries: db.New(pool)}
+	// Parent issue created by an agent on behalf of userID (agent_create origin).
+	// WorkspaceID is set so the workspace-scoped trigger-comment lookup (MUL-4252)
+	// finds the system comment and classifies it (author_type=system) before the
+	// fall-through to issue provenance.
+	issue := db.Issue{
+		CreatorType: "agent",
+		OriginType:  pgtype.Text{String: "agent_create", Valid: true},
+		OriginID:    parentTaskID,
+		WorkspaceID: util.MustParseUUID(workspaceIDStr),
+	}
+
+	got := svc.attributionForIssueTask(ctx, issue, systemCommentID, attribution.SourceDelegation, pgtype.UUID{})
+	if got.Source != attribution.SourceDelegation {
+		t.Fatalf("source = %q, want delegation (system comment must fall through to issue provenance, not owner_fallback)", got.Source)
+	}
+	if !got.UserID.Valid || got.UserID.Bytes != userID.Bytes {
+		t.Errorf("accountable = %s, want %s (the human who caused the parent issue to exist)",
+			util.UUIDToString(got.UserID), util.UUIDToString(userID))
+	}
+}
+
 // TestResolveOriginatorForIssueTask_MemberCreatedNoComment covers direct issue
 // assignment/creation: there is no trigger comment to inspect, but the issue's
 // human creator is still the run originator for Composio overlay gating.
@@ -309,37 +348,18 @@ func TestResolveOriginatorForIssueTask_QuickCreateIssueInheritsParentTask(t *tes
 	}
 }
 
-// TestResolveOriginatorForIssueTask_AgentCreateIssueInheritsParentTask covers
-// the MUL-4305 fix: an agent that creates an issue through the ordinary
-// `issue create` path gets origin_type='agent_create' + origin_id=<acting
-// task>. The issue creator is the agent, but the top-of-chain human lives on
-// that acting task and must be inherited so downstream assignment /
-// squad-leader runs (and the A2A mentions they emit) keep the originator.
-func TestResolveOriginatorForIssueTask_AgentCreateIssueInheritsParentTask(t *testing.T) {
-	pool := newResolveOriginatorPool(t)
-	_, _, parentTaskID, userID, _ := seedOriginatorFanout(t, pool)
-	svc := &TaskService{Queries: db.New(pool)}
-	issue := db.Issue{
-		CreatorType: "agent",
-		OriginType:  pgtype.Text{String: "agent_create", Valid: true},
-		OriginID:    parentTaskID,
-	}
-
-	got := svc.resolveOriginatorForIssueTask(context.Background(), issue, pgtype.UUID{})
-	if !got.Valid {
-		t.Fatalf("expected agent_create issue to inherit originator, got invalid")
-	}
-	if got.Bytes != userID.Bytes {
-		t.Errorf("originator = %s, want %s", util.UUIDToString(got), util.UUIDToString(userID))
-	}
-}
-
-// TestOriginatorForIssueTask_MatchesResolverForAgentCreate pins the gate/enqueue
-// consistency guarantee from MUL-4305: the exported OriginatorForIssueTask
-// (used by the squad-leader access gate) must return the SAME human the
-// unexported resolver persists on the task row. If these drift, an
-// agent-created issue could be attributed correctly on the task row yet denied
-// by a gate that computed a different (empty) originator.
+// TestOriginatorForIssueTask_MatchesResolverForAgentCreate covers the MUL-4305
+// fix. An agent that creates an issue through the ordinary `issue create` path
+// gets origin_type='agent_create' + origin_id=<acting task>. The issue creator
+// is the agent, but the top-of-chain human lives on that acting task and must be
+// inherited so downstream assignment / squad-leader runs (and the A2A mentions
+// they emit) keep the originator.
+//
+// It also pins the gate/enqueue consistency guarantee: the exported
+// OriginatorForIssueTask (used by the squad-leader access gate) must return the
+// SAME human the unexported resolver persists on the task row. If these drift,
+// an agent-created issue could be attributed correctly on the task row yet
+// denied by a gate that computed a different (empty) originator.
 func TestOriginatorForIssueTask_MatchesResolverForAgentCreate(t *testing.T) {
 	pool := newResolveOriginatorPool(t)
 	_, _, parentTaskID, userID, _ := seedOriginatorFanout(t, pool)

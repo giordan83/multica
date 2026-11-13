@@ -5,26 +5,43 @@ import { useSortable, defaultAnimateLayoutChanges } from "@dnd-kit/sortable";
 import type { AnimateLayoutChanges } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { AppLink } from "../../navigation";
-import type { Issue, Project } from "@multica/core/types";
+import type { Issue, Project,
+  IssueProperty,
+} from "@multica/core/types";
 import { formatDateOnly } from "@multica/core/issues/date";
 import { ActorAvatar } from "../../common/actor-avatar";
+import { PropertyIcon } from "../../common/property-icon";
 import { useWorkspacePaths } from "@multica/core/paths";
+import { useQuery } from "@tanstack/react-query";
 import { useViewStore } from "@multica/core/issues/stores/view-store-context";
+import { useWorkspaceId } from "@multica/core/hooks";
+import { propertyListOptions } from "@multica/core/properties";
+import { CustomPropertyValueDisplay } from "./pickers/custom-property-picker";
 import { ProjectIcon } from "../../projects/components/project-icon";
 import { PriorityIcon } from "./priority-icon";
 import { ProgressRing } from "./progress-ring";
 import { IssueActionsContextMenu } from "../actions";
 import { LabelChip } from "../../labels/label-chip";
+import { CustomStatusChip } from "./custom-status-chip";
+import { IssueDuplicateOfMarker } from "./issue-duplicates";
 import { IssueAgentActivityIndicator } from "./issue-agent-activity-indicator";
+import { IssuePullRequestChips, useIssuePullRequestSummaries } from "./pull-request-chips";
 import { useIssueSurfaceSelection } from "../surface/selection-context";
+import {
+  PEEKED_ROW_CLASS,
+  PEEK_TARGET_ATTR,
+  useIsIssuePeeked,
+  useIssuePeekLinkProps,
+} from "../surface/peek-context";
+import { useLocale } from "../../i18n";
 
 export interface ChildProgress {
   done: number;
   total: number;
 }
 
-function formatDate(date: string): string {
-  return formatDateOnly(date, { month: "short", day: "numeric" }, "en-US");
+function formatDate(date: string, locale: string): string {
+  return formatDateOnly(date, { month: "short", day: "numeric" }, locale);
 }
 
 function ListRowContent({
@@ -46,11 +63,20 @@ function ListRowContent({
   containerProps?: Record<string, unknown>;
   checkboxProps?: Pick<React.HTMLAttributes<HTMLDivElement>, "onClick" | "onMouseDown" | "onPointerDown">;
 }) {
+  const locale = useLocale();
   const selection = useIssueSurfaceSelection();
+  const peeked = useIsIssuePeeked(issue.id);
+  const peekLinkProps = useIssuePeekLinkProps(issue.id);
   const selected = selection.selectedIds.has(issue.id);
   const toggle = selection.toggle;
   const p = useWorkspacePaths();
   const storeProperties = useViewStore((s) => s.cardProperties);
+  const cardPropertyIds = useViewStore((s) => s.cardPropertyIds);
+  const rowWsId = useWorkspaceId();
+  const { data: workspaceProperties = [] } = useQuery(propertyListOptions(rowWsId));
+  const cardCustomProperties = cardPropertyIds
+    .map((id) => workspaceProperties.find((p) => p.id === id))
+    .filter((p): p is IssueProperty => !!p && issue.properties?.[p.id] !== undefined);
   const labels = issue.labels ?? [];
 
   const showProject = storeProperties.project && project;
@@ -59,27 +85,38 @@ function ListRowContent({
   const showStartDate = storeProperties.startDate && issue.start_date;
   const showDueDate = storeProperties.dueDate && issue.due_date;
   const showLabels = storeProperties.labels && labels.length > 0;
+  const pullRequests = useIssuePullRequestSummaries(issue.id, storeProperties.pullRequests);
+  const showPullRequests = storeProperties.pullRequests && pullRequests.length > 0;
 
   return (
     <IssueActionsContextMenu issue={issue}>
       <div
         ref={containerRef}
+        data-slot="issue-list-row"
+        data-mc="issue-row"
+        data-status={issue.status}
+        data-priority={issue.priority}
+        data-assignee-type={issue.assignee_type ?? "none"}
+        {...{ [PEEK_TARGET_ATTR]: issue.id }}
+        data-peeked={peeked ? "" : undefined}
         style={containerStyle}
         {...containerProps}
-        className={`group/row flex h-9 items-center gap-2 px-4 text-sm transition-colors ${
+        className={`group/row flex h-[var(--issue-row-height)] items-center gap-2 px-[var(--issue-row-padding-x,1rem)] text-body transition-colors ${
           selected
-            ? "bg-surface-selected hover:not-data-[popup-open]:bg-surface-selected data-[popup-open]:bg-surface-selected"
-            : "hover:not-data-[popup-open]:bg-surface-hover data-[popup-open]:bg-surface-hover"
-        } ${isDragging ? "opacity-30" : ""}`}
+            ? "bg-issue-row-selected hover:not-data-[popup-open]:bg-issue-row-selected data-[popup-open]:bg-issue-row-selected"
+            : "hover:not-data-[popup-open]:bg-issue-row-hover data-[popup-open]:bg-issue-row-hover"
+        } ${PEEKED_ROW_CLASS} ${isDragging ? "opacity-30" : ""}`}
       >
         <div
           className="relative flex shrink-0 items-center justify-center w-4 h-4"
           {...checkboxProps}
         >
-          <PriorityIcon
-            priority={issue.priority}
-            className={selected ? "hidden" : "group-hover/row:hidden"}
-          />
+          {storeProperties.priority && issue.priority !== "none" && (
+            <PriorityIcon
+              priority={issue.priority}
+              className={selected ? "hidden" : "group-hover/row:hidden"}
+            />
+          )}
           <input
             type="checkbox"
             checked={selected}
@@ -91,22 +128,35 @@ function ListRowContent({
         </div>
         <AppLink
           href={p.issueDetail(issue.id)}
+          newTabTitle={issue.identifier}
           className={`flex flex-1 items-center gap-2 min-w-0 ${isDragging ? "pointer-events-none" : ""}`}
+          {...peekLinkProps}
         >
-          <span className="w-16 shrink-0 text-xs text-muted-foreground">
+          <span className="min-w-16 shrink-0 text-caption text-issue-row-identifier">
             {issue.identifier}
           </span>
           <IssueAgentActivityIndicator issueId={issue.id} />
 
           <span className="flex min-w-0 flex-1 items-center gap-1.5">
             <span className="truncate">{issue.title}</span>
+            {/* Keep custom names visible when this row appears outside a status section. */}
+            <CustomStatusChip status={issue.status} className="shrink-0" />
+            <IssueDuplicateOfMarker issue={issue} insideLink />
             {showChildProgress && (
               <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-muted/60 px-1.5 py-0.5">
                 <ProgressRing done={childProgress!.done} total={childProgress!.total} size={14} />
-                <span className="text-[11px] text-muted-foreground tabular-nums font-medium">
+                <span className="text-micro text-muted-foreground tabular-nums font-medium">
                   {childProgress!.done}/{childProgress!.total}
                 </span>
               </span>
+            )}
+            {showPullRequests && (
+              // Capped so a long PR set never squeezes the title away.
+              <IssuePullRequestChips
+                pullRequests={pullRequests}
+                max={2}
+                className="max-w-[40%]"
+              />
             )}
             {showLabels && (
               <span className="ml-1.5 hidden md:inline-flex shrink-0 items-center gap-1 max-w-[260px] overflow-hidden">
@@ -114,27 +164,40 @@ function ListRowContent({
                   <LabelChip key={label.id} label={label} />
                 ))}
                 {labels.length > 3 && (
-                  <span className="text-[11px] text-muted-foreground">
+                  <span className="text-micro text-muted-foreground">
                     +{labels.length - 3}
                   </span>
                 )}
               </span>
             )}
+            {cardCustomProperties.length > 0 && (
+              <span className="ml-1.5 hidden md:inline-flex shrink-0 items-center gap-1 max-w-[260px] overflow-hidden">
+                {cardCustomProperties.slice(0, 3).map((property) => (
+                  <span
+                    key={property.id}
+                    className="inline-flex max-w-[120px] items-center gap-1 rounded-full bg-muted/60 px-1.5 py-0.5 text-micro text-muted-foreground"
+                  >
+                    <PropertyIcon property={property} className="size-3 text-micro" />
+                    <CustomPropertyValueDisplay property={property} value={issue.properties?.[property.id]} />
+                  </span>
+                ))}
+              </span>
+            )}
           </span>
           {showProject && (
-            <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground max-w-[140px]">
+            <span className="inline-flex shrink-0 items-center gap-1 text-caption text-muted-foreground max-w-[140px]">
               <ProjectIcon project={project} size="sm" />
               <span className="truncate">{project!.title}</span>
             </span>
           )}
           {showStartDate && (
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {formatDate(issue.start_date!)}
+            <span className="shrink-0 text-caption text-muted-foreground">
+              {formatDate(issue.start_date!, locale)}
             </span>
           )}
           {showDueDate && (
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {formatDate(issue.due_date!)}
+            <span className="shrink-0 text-caption text-muted-foreground">
+              {formatDate(issue.due_date!, locale)}
             </span>
           )}
           {showAssignee && (

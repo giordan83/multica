@@ -8,6 +8,7 @@ export {
   isPlainShortcut,
   formatShortcut,
   isEditableShortcutTarget,
+  isPortalLayerShortcutTarget,
   isReservedShortcut,
   isShortcutAllowedForAction,
   type ShortcutActionDefinition,
@@ -18,9 +19,13 @@ export {
 } from "./definitions";
 export {
   configureShortcutPlatform,
+  configureShortcutRuntime,
   detectShortcutPlatform,
+  detectShortcutRuntime,
   getShortcutPlatform,
+  getShortcutRuntime,
   type ShortcutPlatform,
+  type ShortcutRuntime,
 } from "./platform";
 export {
   useShortcutStore,
